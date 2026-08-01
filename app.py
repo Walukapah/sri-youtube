@@ -947,7 +947,9 @@ def youtube_endpoint():
         inner_result["channel"] = channel_info
 
         return make_json_response({
-            inner_result
+            "result": {
+                inner_result
+            }
         })
 
     except Exception as e:
