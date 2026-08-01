@@ -885,12 +885,10 @@ def get_channel_info(channel_id=None, channel_handle=None):
 @app.route('/')
 def home():
     return make_json_response({
-        "status": True,
         "message": "YouTube Info API is running",
         "endpoints": {
             "/youtube?url=<youtube_url>": "Get video, channel & download info"
-        },
-        "creator": "WALUKA🇱🇰"
+        }
     })
 
 
@@ -899,16 +897,12 @@ def youtube_endpoint():
     url = request.args.get('url')
     if not url:
         return make_json_response({
-            "status": False,
-            "creator": "WALUKA🇱🇰",
             "error": "Missing 'url' parameter. Usage: /youtube?url=<youtube_url>"
         }, 400)
 
     video_id = extract_video_id(url)
     if not video_id:
         return make_json_response({
-            "status": False,
-            "creator": "WALUKA🇱🇰",
             "error": "Could not extract video ID from URL",
             "url": url,
             "supported_formats": [
@@ -946,16 +940,10 @@ def youtube_endpoint():
 
         inner_result["channel"] = channel_info
 
-        return make_json_response({
-            "result": {
-                inner_result
-            }
-        })
+        return make_json_response(inner_result)
 
     except Exception as e:
         return make_json_response({
-            "status": False,
-            "creator": "WALUKA🇱🇰",
             "error": str(e)
         }, 500)
 
