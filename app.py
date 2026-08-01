@@ -947,11 +947,7 @@ def youtube_endpoint():
         inner_result["channel"] = channel_info
 
         return make_json_response({
-            "status": True,
-            "creator": "WALUKA🇱🇰",
-            "result": {
-                "result": inner_result
-            }
+            inner_result
         })
 
     except Exception as e:
