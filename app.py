@@ -200,6 +200,118 @@ def get_innertube_player(video_id):
     return None
 
 
+def extract_like_count_from_innertube(data):
+    """Extract like count from various places in InnerTube response"""
+    # Try videoDetails.likes
+    video_details = data.get('videoDetails', {})
+    if video_details.get('likes'):
+        try:
+            return int(video_details['likes'])
+        except:
+            pass
+
+    # Try engagement panels
+    engagement_panels = data.get('engagementPanels', [])
+    for panel in engagement_panels:
+        try:
+            content = panel.get('engagementPanelSectionListRenderer', {}).get('content', {})
+            # Look for like count in various nested structures
+            for key in content:
+                if isinstance(content[key], dict):
+                    # Search recursively for likeCount or like count text
+                    def search_likes(obj):
+                        if isinstance(obj, dict):
+                            # Check for likeCount
+                            if 'likeCount' in obj:
+                                val = obj['likeCount']
+                                if isinstance(val, str):
+                                    return int(val.replace(',', ''))
+                                return int(val)
+                            # Check for like button
+                            if 'likeButton' in obj:
+                                lb = obj['likeButton']
+                                if isinstance(lb, dict):
+                                    for k, v in lb.items():
+                                        if isinstance(v, str) and v.replace(',', '').isdigit():
+                                            return int(v.replace(',', ''))
+                            # Check for topLevelButtons
+                            if 'topLevelButtons' in obj:
+                                for btn in obj['topLevelButtons']:
+                                    if isinstance(btn, dict):
+                                        for bk, bv in btn.items():
+                                            if isinstance(bv, dict):
+                                                txt = bv.get('title', '')
+                                                if txt and txt.replace(',', '').replace('.', '').replace('K', '').replace('M', '').replace('B', '').strip().isdigit():
+                                                    # Parse formatted count
+                                                    txt = txt.strip()
+                                                    try:
+                                                        if 'K' in txt:
+                                                            return int(float(txt.replace('K', '')) * 1000)
+                                                        elif 'M' in txt:
+                                                            return int(float(txt.replace('M', '')) * 1000000)
+                                                        elif 'B' in txt:
+                                                            return int(float(txt.replace('B', '')) * 1000000000)
+                                                        else:
+                                                            return int(txt.replace(',', ''))
+                                                    except:
+                                                        pass
+                            # Recurse
+                            for k, v in obj.items():
+                                result = search_likes(v)
+                                if result is not None:
+                                    return result
+                        elif isinstance(obj, list):
+                            for item in obj:
+                                result = search_likes(item)
+                                if result is not None:
+                                    return result
+                        return None
+
+                    result = search_likes(content[key])
+                    if result is not None:
+                        return result
+        except:
+            continue
+
+    return None
+
+
+def extract_like_count_from_html(html):
+    """Extract like count from HTML using multiple patterns"""
+    patterns = [
+        r'"likeCount":"(\d+)"',
+        r'"likes":\{"simpleText":"([\d,.]+)"\}',
+        r'"likeThisVideo.*?"simpleText"\s*:\s*"([\d,.KM]+)"',
+        r'"topLevelButtons".*?"title"\s*:\s*"([\d,.KM]+ likes?)"',
+        r'"defaultText"\s*:\s*\{\s*"accessibility".*?"label"\s*:\s*"([\d,.]+)',
+        r'"toggleButtonRenderer".*?"([\d,.]+ likes?)"',
+        r'like this video along with ([\d,.]+) other people',
+        r'"likeCount"\s*:\s*"?([\d,.]+)"?',
+        r'"likeCountEntity".*?"count"\s*:\s*"?([\d,.]+)"?',
+        r'"sentimentBar".*?"([\d,.]+) likes?',
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, html, re.IGNORECASE | re.DOTALL)
+        if match:
+            text = match.group(1).strip()
+            try:
+                # Handle formatted counts like 1.2K, 3.4M
+                text = text.replace(',', '').replace(' likes', '').replace(' like', '')
+                if 'K' in text:
+                    return int(float(text.replace('K', '')) * 1000)
+                elif 'M' in text:
+                    return int(float(text.replace('M', '')) * 1000000)
+                elif 'B' in text:
+                    return int(float(text.replace('B', '')) * 1000000000)
+                else:
+                    return int(float(text))
+            except:
+                continue
+
+    return None
+
+
 def get_video_info(video_id, video_url):
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -289,6 +401,11 @@ def get_video_info(video_id, video_url):
             thumbs = video_details.get('thumbnail', {}).get('thumbnails', [])
             if thumbs:
                 info['thumbnails'] = thumbs
+
+        # Try to get like count from InnerTube
+        like_count = extract_like_count_from_innertube(innertube_data)
+        if like_count is not None:
+            info['like_count'] = like_count
 
         # Microformat from InnerTube
         microformat = innertube_data.get('microformat', {}).get('playerMicroformatRenderer', {})
@@ -426,26 +543,11 @@ def get_video_info(video_id, video_url):
             if view_match:
                 info['view_count'] = int(view_match.group(1))
 
+        # Extract like count from HTML if not already found
         if not info.get('like_count'):
-            like_match = re.search(r'"likeCount":"(\d+)"', html)
-            if like_match:
-                info['like_count'] = int(like_match.group(1))
-
-        # Try to get likes from engagement panels
-        if not info.get('like_count'):
-            like_patterns = [
-                r'"likes"\s*:\s*{\s*"runs"\s*:\s*\[\s*{\s*"text"\s*:\s*"([\d,.]+)"',
-                r'"likeThisVideo".*?"simpleText"\s*:\s*"([\d,.]+)"',
-                r'"likeCount"\s*:\s*"?([\d,.]+)"?',
-            ]
-            for pattern in like_patterns:
-                match = re.search(pattern, html, re.DOTALL)
-                if match:
-                    try:
-                        info['like_count'] = int(match.group(1).replace(',', '').replace('.', ''))
-                        break
-                    except:
-                        continue
+            like_count = extract_like_count_from_html(html)
+            if like_count is not None:
+                info['like_count'] = like_count
 
         sub_match = re.search(r'"subscriberCountText":\{"simpleText":"([^"]+)"\}', html)
         if sub_match:
@@ -832,11 +934,9 @@ def youtube_endpoint():
             elif v == "" and k in ['publish_date_format', 'upload_date_format']:
                 cleaned_video[k] = v
 
-        result = {
-            "video_details": cleaned_video,
-            "formats": {},
-            "channel": channel_info
-        }
+        # Explicitly ordered response: video_details -> formats -> channel
+        result = {}
+        result["video_details"] = cleaned_video
 
         if download_data and download_data.get('success'):
             result["formats"] = download_data.get('formats', {})
@@ -844,6 +944,8 @@ def youtube_endpoint():
             result["formats"] = {"error": download_data['api_error']}
         else:
             result["formats"] = {"error": "Failed to fetch download links from API"}
+
+        result["channel"] = channel_info
 
         return jsonify({
             "status": True,
