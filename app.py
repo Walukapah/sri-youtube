@@ -11,7 +11,7 @@ import json
 import urllib.request
 import urllib.parse
 import socket
-from flask import Flask, request, jsonify
+from flask import Flask, request, Response
 from flask_cors import CORS
 
 app = Flask(__name__)
@@ -19,6 +19,15 @@ CORS(app)
 
 API_BASE = "https://youtubedl-skbk.onrender.com"
 INNERTUBE_API_KEY = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"
+
+
+def make_json_response(data, status_code=200):
+    """Return pretty-printed JSON with preserved key order"""
+    return Response(
+        json.dumps(data, indent=2, ensure_ascii=False, sort_keys=False),
+        status=status_code,
+        mimetype='application/json; charset=utf-8'
+    )
 
 
 def extract_video_id(url):
@@ -202,7 +211,6 @@ def get_innertube_player(video_id):
 
 def extract_like_count_from_innertube(data):
     """Extract like count from various places in InnerTube response"""
-    # Try videoDetails.likes
     video_details = data.get('videoDetails', {})
     if video_details.get('likes'):
         try:
@@ -210,31 +218,25 @@ def extract_like_count_from_innertube(data):
         except:
             pass
 
-    # Try engagement panels
     engagement_panels = data.get('engagementPanels', [])
     for panel in engagement_panels:
         try:
             content = panel.get('engagementPanelSectionListRenderer', {}).get('content', {})
-            # Look for like count in various nested structures
             for key in content:
                 if isinstance(content[key], dict):
-                    # Search recursively for likeCount or like count text
                     def search_likes(obj):
                         if isinstance(obj, dict):
-                            # Check for likeCount
                             if 'likeCount' in obj:
                                 val = obj['likeCount']
                                 if isinstance(val, str):
                                     return int(val.replace(',', ''))
                                 return int(val)
-                            # Check for like button
                             if 'likeButton' in obj:
                                 lb = obj['likeButton']
                                 if isinstance(lb, dict):
                                     for k, v in lb.items():
                                         if isinstance(v, str) and v.replace(',', '').isdigit():
                                             return int(v.replace(',', ''))
-                            # Check for topLevelButtons
                             if 'topLevelButtons' in obj:
                                 for btn in obj['topLevelButtons']:
                                     if isinstance(btn, dict):
@@ -242,7 +244,6 @@ def extract_like_count_from_innertube(data):
                                             if isinstance(bv, dict):
                                                 txt = bv.get('title', '')
                                                 if txt and txt.replace(',', '').replace('.', '').replace('K', '').replace('M', '').replace('B', '').strip().isdigit():
-                                                    # Parse formatted count
                                                     txt = txt.strip()
                                                     try:
                                                         if 'K' in txt:
@@ -255,7 +256,6 @@ def extract_like_count_from_innertube(data):
                                                             return int(txt.replace(',', ''))
                                                     except:
                                                         pass
-                            # Recurse
                             for k, v in obj.items():
                                 result = search_likes(v)
                                 if result is not None:
@@ -296,7 +296,6 @@ def extract_like_count_from_html(html):
         if match:
             text = match.group(1).strip()
             try:
-                # Handle formatted counts like 1.2K, 3.4M
                 text = text.replace(',', '').replace(' likes', '').replace(' like', '')
                 if 'K' in text:
                     return int(float(text.replace('K', '')) * 1000)
@@ -885,7 +884,7 @@ def get_channel_info(channel_id=None, channel_handle=None):
 
 @app.route('/')
 def home():
-    return jsonify({
+    return make_json_response({
         "status": True,
         "message": "YouTube Info API is running",
         "endpoints": {
@@ -899,15 +898,15 @@ def home():
 def youtube_endpoint():
     url = request.args.get('url')
     if not url:
-        return jsonify({
+        return make_json_response({
             "status": False,
             "creator": "WALUKA🇱🇰",
             "error": "Missing 'url' parameter. Usage: /youtube?url=<youtube_url>"
-        }), 400
+        }, 400)
 
     video_id = extract_video_id(url)
     if not video_id:
-        return jsonify({
+        return make_json_response({
             "status": False,
             "creator": "WALUKA🇱🇰",
             "error": "Could not extract video ID from URL",
@@ -918,7 +917,7 @@ def youtube_endpoint():
                 "https://m.youtube.com/watch?v=VIDEO_ID",
                 "https://www.youtube.com/shorts/VIDEO_ID"
             ]
-        }), 400
+        }, 400)
 
     try:
         video_info, channel_id, channel_handle = get_video_info(video_id, url)
@@ -934,33 +933,33 @@ def youtube_endpoint():
             elif v == "" and k in ['publish_date_format', 'upload_date_format']:
                 cleaned_video[k] = v
 
-        # Explicitly ordered response: video_details -> formats -> channel
-        result = {}
-        result["video_details"] = cleaned_video
+        # Build result with explicit order: video_details -> formats -> channel
+        inner_result = {}
+        inner_result["video_details"] = cleaned_video
 
         if download_data and download_data.get('success'):
-            result["formats"] = download_data.get('formats', {})
+            inner_result["formats"] = download_data.get('formats', {})
         elif download_data and download_data.get('api_error'):
-            result["formats"] = {"error": download_data['api_error']}
+            inner_result["formats"] = {"error": download_data['api_error']}
         else:
-            result["formats"] = {"error": "Failed to fetch download links from API"}
+            inner_result["formats"] = {"error": "Failed to fetch download links from API"}
 
-        result["channel"] = channel_info
+        inner_result["channel"] = channel_info
 
-        return jsonify({
+        return make_json_response({
             "status": True,
             "creator": "WALUKA🇱🇰",
             "result": {
-                "result": result
+                "result": inner_result
             }
         })
 
     except Exception as e:
-        return jsonify({
+        return make_json_response({
             "status": False,
             "creator": "WALUKA🇱🇰",
             "error": str(e)
-        }), 500
+        }, 500)
 
 
 if __name__ == '__main__':
