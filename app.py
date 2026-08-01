@@ -4,6 +4,7 @@ YouTube Info API - Render Compatible
 Endpoint: GET /youtube?url=<youtube_url>
 """
 
+import os
 import sys
 import re
 import json
@@ -17,6 +18,7 @@ app = Flask(__name__)
 CORS(app)
 
 API_BASE = "https://youtubedl-skbk.onrender.com"
+INNERTUBE_API_KEY = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"
 
 
 def extract_video_id(url):
@@ -68,7 +70,7 @@ def extract_handle_from_html(text):
     return None
 
 
-def fetch_url(url, headers=None, timeout=15):
+def fetch_url(url, headers=None, timeout=15, method="GET", data=None):
     if headers is None:
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -78,10 +80,13 @@ def fetch_url(url, headers=None, timeout=15):
             'Connection': 'keep-alive',
         }
     try:
-        req = urllib.request.Request(url, headers=headers)
+        req = urllib.request.Request(url, headers=headers, method=method)
+        if method == "POST" and data:
+            req.add_header('Content-Type', 'application/json')
         req.add_header('Cookie', 'CONSENT=YES+cb.20210328-17-p0.en+FX+{}'.format(100 + hash(url) % 900))
         socket.setdefaulttimeout(timeout)
-        with urllib.request.urlopen(req, timeout=timeout) as response:
+        body = json.dumps(data).encode('utf-8') if data else None
+        with urllib.request.urlopen(req, data=body, timeout=timeout) as response:
             return response.read().decode('utf-8')
     except Exception:
         return None
@@ -91,6 +96,10 @@ def fetch_url(url, headers=None, timeout=15):
 
 def format_duration(seconds):
     if not seconds:
+        return None
+    try:
+        seconds = int(seconds)
+    except:
         return None
     hours = seconds // 3600
     minutes = (seconds % 3600) // 60
@@ -161,6 +170,36 @@ def get_download_info(video_url):
         return {"api_error": str(e)}
 
 
+def get_innertube_player(video_id):
+    """Use YouTube InnerTube API for reliable video data"""
+    try:
+        url = f"https://www.youtube.com/youtubei/v1/player?key={INNERTUBE_API_KEY}"
+        payload = {
+            "context": {
+                "client": {
+                    "clientName": "WEB",
+                    "clientVersion": "2.20240701.00.00",
+                    "hl": "en",
+                    "gl": "US"
+                }
+            },
+            "videoId": video_id,
+            "params": "CgIQBg=="
+        }
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept': 'application/json',
+            'Content-Type': 'application/json',
+            'X-Goog-Visitor-Id': 'CgtXXXXXXXXXXXXXXXXXXX',
+        }
+        response = fetch_url(url, headers=headers, timeout=20, method="POST", data=payload)
+        if response:
+            return json.loads(response)
+    except Exception:
+        pass
+    return None
+
+
 def get_video_info(video_id, video_url):
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -187,13 +226,14 @@ def get_video_info(video_id, video_url):
 
     channel_id = None
     channel_handle = None
+    html = None
 
-    # oEmbed
+    # === Method 1: oEmbed API ===
     try:
         oembed_url = f"https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={video_id}&format=json"
-        html = fetch_url(oembed_url, headers, timeout=10)
-        if html:
-            oembed_data = json.loads(html)
+        oembed_html = fetch_url(oembed_url, headers, timeout=10)
+        if oembed_html:
+            oembed_data = json.loads(oembed_html)
             info.update({
                 'title': oembed_data.get('title'),
                 'author_name': oembed_data.get('author_name'),
@@ -210,8 +250,7 @@ def get_video_info(video_id, video_url):
     except Exception:
         pass
 
-    # Fetch YouTube page
-    html = None
+    # === Method 2: Fetch YouTube watch page ===
     page_sources = [
         f"https://www.youtube.com/watch?v={video_id}",
         f"https://www.youtube.com/watch?v={video_id}&bpctr=9999999999&has_verified=1",
@@ -221,107 +260,192 @@ def get_video_info(video_id, video_url):
     for page_url in page_sources:
         try:
             html = fetch_url(page_url, headers, timeout=20)
-            if html and ('ytInitialPlayerResponse' in html or 'videoDetails' in html):
+            if html:
                 break
         except:
             continue
 
-    try:
-        if not html:
-            raise ValueError("No HTML content fetched")
+    # === Method 3: InnerTube API (most reliable) ===
+    innertube_data = get_innertube_player(video_id)
 
-        channel_id = extract_channel_id(html)
+    # Extract from InnerTube first (most reliable)
+    if innertube_data:
+        video_details = innertube_data.get('videoDetails', {})
+        if video_details:
+            info['title'] = video_details.get('title') or info.get('title')
+            info['author'] = video_details.get('author') or info.get('author_name')
+            info['channel_id'] = video_details.get('channelId') or info.get('channel_id')
+            info['description'] = video_details.get('shortDescription')
+            info['duration_seconds'] = int(video_details.get('lengthSeconds', 0)) if video_details.get('lengthSeconds') else None
+            info['view_count'] = int(video_details.get('viewCount', 0)) if video_details.get('viewCount') else None
+            info['keywords'] = video_details.get('keywords', [])
+            info['is_private'] = video_details.get('isPrivate', False)
+            info['is_live'] = video_details.get('isLive', False)
+            info['is_live_content'] = video_details.get('isLiveContent', False)
 
-        match = re.search(r'ytInitialPlayerResponse\s*=\s*({.+?});(?:\s*</script>|\s*var)', html, re.DOTALL)
-        if not match:
-            match = re.search(r'ytInitialPlayerResponse\s*=\s*({.+?});', html, re.DOTALL)
+            if video_details.get('channelId'):
+                channel_id = video_details.get('channelId')
 
-        if match:
-            try:
-                player_data = json.loads(match.group(1))
-                video_details = player_data.get('videoDetails', {})
+            thumbs = video_details.get('thumbnail', {}).get('thumbnails', [])
+            if thumbs:
+                info['thumbnails'] = thumbs
 
-                info['title'] = video_details.get('title', info.get('title'))
-                info['author'] = video_details.get('author', info.get('author_name'))
-                info['channel_id'] = video_details.get('channelId') or channel_id
-                info['description'] = video_details.get('shortDescription')
-                info['duration_seconds'] = int(video_details.get('lengthSeconds', 0)) if video_details.get('lengthSeconds') else None
-                info['view_count'] = int(video_details.get('viewCount', 0)) if video_details.get('viewCount') else None
-                info['like_count'] = int(video_details.get('likes', 0)) if video_details.get('likes') else None
+        # Microformat from InnerTube
+        microformat = innertube_data.get('microformat', {}).get('playerMicroformatRenderer', {})
+        if microformat:
+            info['publish_date'] = microformat.get('publishDate')
+            info['upload_date'] = microformat.get('uploadDate')
+            info['category'] = microformat.get('category')
+            info['is_family_safe'] = microformat.get('isFamilySafe')
+            info['has_ypc_metadata'] = microformat.get('hasYpcMetadata', False)
+            info['owner_channel_name'] = microformat.get('ownerChannelName')
+            info['owner_profile_url'] = microformat.get('ownerProfileUrl')
+            info['upload_date_iso'] = microformat.get('uploadDate')
+            info['publish_date_iso'] = microformat.get('publishDate')
+            info['duration_iso'] = microformat.get('lengthSeconds')
+
+            if microformat.get('ownerProfileUrl'):
+                h = extract_handle_from_url(microformat['ownerProfileUrl'])
+                if h:
+                    channel_handle = h
+
+            owner = microformat.get('videoOwner', {})
+            if owner:
+                info['owner'] = owner
+
+        # Captions from InnerTube
+        captions = innertube_data.get('captions', {}).get('playerCaptionsTracklistRenderer', {})
+        if captions:
+            caption_tracks = captions.get('captionTracks', [])
+            if caption_tracks:
+                info['captions'] = [
+                    {
+                        'name': track.get('name', {}).get('simpleText'),
+                        'language_code': track.get('languageCode'),
+                        'is_translatable': track.get('isTranslatable', False),
+                    }
+                    for track in caption_tracks
+                ]
+            info['audio_tracks'] = captions.get('audioTracks', [])
+            info['default_audio_track_index'] = captions.get('defaultAudioTrackIndex')
+
+    # === Extract from HTML as fallback / supplement ===
+    if html:
+        if not channel_id:
+            channel_id = extract_channel_id(html)
+
+        # Try ytInitialPlayerResponse from HTML
+        player_data = None
+        patterns = [
+            r'ytInitialPlayerResponse\s*=\s*({.+?});(?:\s*</script>|\s*var)',
+            r'ytInitialPlayerResponse\s*=\s*({.+?});',
+            r'"playerResponse":\s*({.+?})[;,]',
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, html, re.DOTALL)
+            if match:
+                try:
+                    player_data = json.loads(match.group(1))
+                    break
+                except:
+                    continue
+
+        if player_data:
+            video_details = player_data.get('videoDetails', {})
+            if video_details:
+                info['title'] = video_details.get('title') or info.get('title')
+                info['author'] = video_details.get('author') or info.get('author')
+                info['channel_id'] = video_details.get('channelId') or info.get('channel_id') or channel_id
+                info['description'] = video_details.get('shortDescription') or info.get('description')
+                if video_details.get('lengthSeconds'):
+                    info['duration_seconds'] = int(video_details['lengthSeconds'])
+                if video_details.get('viewCount'):
+                    info['view_count'] = int(video_details['viewCount'])
+                info['keywords'] = video_details.get('keywords') or info.get('keywords', [])
                 info['is_private'] = video_details.get('isPrivate', False)
                 info['is_live'] = video_details.get('isLive', False)
                 info['is_live_content'] = video_details.get('isLiveContent', False)
-                info['keywords'] = video_details.get('keywords', [])
-                info['category'] = video_details.get('category')
-                info['publish_date'] = video_details.get('publishDate')
-                info['upload_date'] = video_details.get('uploadDate')
 
                 if video_details.get('channelId'):
                     channel_id = video_details.get('channelId')
 
                 thumbs = video_details.get('thumbnail', {}).get('thumbnails', [])
-                if thumbs:
+                if thumbs and not info.get('thumbnails'):
                     info['thumbnails'] = thumbs
 
-                microformat = player_data.get('microformat', {}).get('playerMicroformatRenderer', {})
-                if microformat:
-                    info['publish_date'] = microformat.get('publishDate') or info.get('publish_date')
-                    info['upload_date'] = microformat.get('uploadDate') or info.get('upload_date')
-                    info['category'] = microformat.get('category') or info.get('category')
+            microformat = player_data.get('microformat', {}).get('playerMicroformatRenderer', {})
+            if microformat:
+                info['publish_date'] = microformat.get('publishDate') or info.get('publish_date')
+                info['upload_date'] = microformat.get('uploadDate') or info.get('upload_date')
+                info['category'] = microformat.get('category') or info.get('category')
+                if microformat.get('isFamilySafe') is not None:
                     info['is_family_safe'] = microformat.get('isFamilySafe')
-                    info['has_ypc_metadata'] = microformat.get('hasYpcMetadata', False)
-                    info['owner_channel_name'] = microformat.get('ownerChannelName')
-                    info['owner_profile_url'] = microformat.get('ownerProfileUrl')
-                    info['upload_date_iso'] = microformat.get('uploadDate')
-                    info['publish_date_iso'] = microformat.get('publishDate')
-                    info['duration_iso'] = microformat.get('lengthSeconds')
+                info['has_ypc_metadata'] = microformat.get('hasYpcMetadata', info.get('has_ypc_metadata', False))
+                info['owner_channel_name'] = microformat.get('ownerChannelName') or info.get('owner_channel_name')
+                info['owner_profile_url'] = microformat.get('ownerProfileUrl') or info.get('owner_profile_url')
+                info['upload_date_iso'] = microformat.get('uploadDate') or info.get('upload_date_iso')
+                info['publish_date_iso'] = microformat.get('publishDate') or info.get('publish_date_iso')
+                info['duration_iso'] = microformat.get('lengthSeconds') or info.get('duration_iso')
 
-                    owner_profile_url = microformat.get('ownerProfileUrl')
-                    if owner_profile_url:
-                        h = extract_handle_from_url(owner_profile_url)
-                        if h:
-                            channel_handle = h
+                owner_profile_url = microformat.get('ownerProfileUrl')
+                if owner_profile_url:
+                    h = extract_handle_from_url(owner_profile_url)
+                    if h:
+                        channel_handle = h
 
-                    owner = microformat.get('videoOwner', {})
-                    if owner:
-                        info['owner'] = owner
+                owner = microformat.get('videoOwner', {})
+                if owner:
+                    info['owner'] = owner
 
-                captions = player_data.get('captions', {}).get('playerCaptionsTracklistRenderer', {})
-                if captions:
-                    caption_tracks = captions.get('captionTracks', [])
-                    if caption_tracks:
-                        info['captions'] = [
-                            {
-                                'name': track.get('name', {}).get('simpleText'),
-                                'language_code': track.get('languageCode'),
-                                'is_translatable': track.get('isTranslatable', False),
-                            }
-                            for track in caption_tracks
-                        ]
-                    info['audio_tracks'] = captions.get('audioTracks', [])
-                    info['default_audio_track_index'] = captions.get('defaultAudioTrackIndex')
+            captions = player_data.get('captions', {}).get('playerCaptionsTracklistRenderer', {})
+            if captions and not info.get('captions'):
+                caption_tracks = captions.get('captionTracks', [])
+                if caption_tracks:
+                    info['captions'] = [
+                        {
+                            'name': track.get('name', {}).get('simpleText'),
+                            'language_code': track.get('languageCode'),
+                            'is_translatable': track.get('isTranslatable', False),
+                        }
+                        for track in caption_tracks
+                    ]
+                info['audio_tracks'] = captions.get('audioTracks', [])
+                info['default_audio_track_index'] = captions.get('defaultAudioTrackIndex')
 
-            except json.JSONDecodeError:
-                pass
-        else:
-            info['player_response_not_found'] = True
-
+        # HTML meta fallbacks
         meta_title = re.search(r'<meta name="title" content="([^"]+)">', html)
         if meta_title and not info.get('title'):
             info['title'] = meta_title.group(1)
 
         meta_desc = re.search(r'<meta name="description" content="([^"]+)">', html)
-        if meta_desc:
-            info['meta_description'] = meta_desc.group(1)
+        if meta_desc and not info.get('description'):
+            info['description'] = meta_desc.group(1)
 
         if not info.get('view_count'):
             view_match = re.search(r'"viewCount":"(\d+)"', html)
             if view_match:
                 info['view_count'] = int(view_match.group(1))
 
-        like_match = re.search(r'"likeCount":"(\d+)"', html)
-        if like_match:
-            info['like_count'] = int(like_match.group(1))
+        if not info.get('like_count'):
+            like_match = re.search(r'"likeCount":"(\d+)"', html)
+            if like_match:
+                info['like_count'] = int(like_match.group(1))
+
+        # Try to get likes from engagement panels
+        if not info.get('like_count'):
+            like_patterns = [
+                r'"likes"\s*:\s*{\s*"runs"\s*:\s*\[\s*{\s*"text"\s*:\s*"([\d,.]+)"',
+                r'"likeThisVideo".*?"simpleText"\s*:\s*"([\d,.]+)"',
+                r'"likeCount"\s*:\s*"?([\d,.]+)"?',
+            ]
+            for pattern in like_patterns:
+                match = re.search(pattern, html, re.DOTALL)
+                if match:
+                    try:
+                        info['like_count'] = int(match.group(1).replace(',', '').replace('.', ''))
+                        break
+                    except:
+                        continue
 
         sub_match = re.search(r'"subscriberCountText":\{"simpleText":"([^"]+)"\}', html)
         if sub_match:
@@ -331,49 +455,16 @@ def get_video_info(video_id, video_url):
         if comment_match:
             info['comment_count_text'] = comment_match.group(1)
 
-    except Exception:
-        pass
+        # Extract channel handle from HTML if not found
+        if not channel_handle:
+            channel_handle = extract_handle_from_html(html)
 
-    # Fallback nocookie
-    if not info.get('title') or info.get('title') == 'YouTube':
-        try:
-            nocookie_url = f"https://www.youtube-nocookie.com/embed/{video_id}"
-            nocookie_html = fetch_url(nocookie_url, headers, timeout=10)
-            if nocookie_html:
-                title_match = re.search(r'<title>([^<]+)</title>', nocookie_html)
-                if title_match:
-                    extracted = title_match.group(1).replace(' - YouTube', '').strip()
-                    if extracted and extracted != 'YouTube':
-                        info['title'] = extracted
-                if 'ytInitialPlayerResponse' in nocookie_html:
-                    match = re.search(r'ytInitialPlayerResponse\s*=\s*({.+?});', nocookie_html, re.DOTALL)
-                    if match:
-                        try:
-                            embed_data = json.loads(match.group(1))
-                            embed_details = embed_data.get('videoDetails', {})
-                            if embed_details.get('title') and embed_details['title'] != 'YouTube':
-                                info['title'] = embed_details['title']
-                            if embed_details.get('author'):
-                                info['author'] = embed_details['author']
-                            if embed_details.get('channelId'):
-                                info['channel_id'] = embed_details['channelId']
-                                channel_id = embed_details['channelId']
-                            if embed_details.get('shortDescription'):
-                                info['description'] = embed_details['shortDescription']
-                            if embed_details.get('lengthSeconds'):
-                                info['duration_seconds'] = int(embed_details['lengthSeconds'])
-                            if embed_details.get('viewCount'):
-                                info['view_count'] = int(embed_details['viewCount'])
-                        except:
-                            pass
-        except:
-            pass
+    # === Format human-readable fields ===
+    duration_formatted = format_duration(info.get('duration_seconds'))
+    view_count_formatted = format_count(info.get('view_count'))
+    like_count_formatted = format_count(info.get('like_count'))
 
-    # Formatting
-    duration_formatted = format_duration(info['duration_seconds']) if info.get('duration_seconds') else None
-    view_count_formatted = format_count(info['view_count']) if info.get('view_count') else None
-    like_count_formatted = format_count(info['like_count']) if info.get('like_count') else None
-
+    # Build ordered info dict
     ordered_info = {}
     inserted = set()
 
